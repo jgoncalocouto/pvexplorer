@@ -60,7 +60,9 @@ site = Location(latitude=lat, longitude=lon, tz=tz, altitude=elevation, name="Si
 solpos = site.get_solarposition(times)
 
 # Clear-sky (Ineichen)
-clearsky = site.get_clearsky(times, model="ineichen")  # returns GHI, DNI, DHI
+clearsky = site.get_clearsky(times, model="ineichen")  # returns ghi, dni, dhi
+# Standardize column names to upper-case for downstream access
+clearsky = clearsky.rename(columns=str.upper)
 
 # Airmass for temp model (optional - here just to demonstrate pipeline)
 pressure = pvlib.atmosphere.alt2pres(elevation)
