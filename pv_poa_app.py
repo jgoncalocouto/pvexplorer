@@ -50,6 +50,30 @@ def compute_daily_energy_kwh(series: pd.Series) -> pd.Series:
     return daily
 
 
+def integrate_power_kw_to_daily_energy(power_kw: pd.Series) -> pd.Series:
+    """Integrate a kW power time-series to daily kWh using forward differences."""
+
+    if power_kw.empty:
+        return pd.Series(dtype=float)
+
+    idx = power_kw.index
+    values = power_kw.to_numpy(dtype=float)
+
+    if len(values) == 1:
+        delta_hours = np.zeros_like(values)
+    else:
+        diffs = np.diff(idx.asi8) / NS_PER_HOUR
+        positive_diffs = diffs[diffs > 0]
+        fallback = float(np.median(positive_diffs)) if positive_diffs.size else 1.0
+        diffs = np.where(diffs > 0, diffs, fallback)
+        delta_hours = np.append(diffs, fallback)
+
+    energy = values * delta_hours
+    daily = pd.Series(energy, index=idx).resample("D").sum(min_count=1)
+    daily.index.name = "date"
+    return daily
+
+
 @st.cache_data(show_spinner=False)
 def dataframe_to_csv_bytes(df: pd.DataFrame) -> bytes:
     """Serialize a dataframe (with index) to UTF-8 encoded CSV bytes for download."""
@@ -231,6 +255,11 @@ with st.sidebar:
     freq_label = st.selectbox("Time step", ["15 min", "30 min", "1h"], index=2)
     freq = {"15 min": "15min", "30 min": "30min", "1h": "1h"}[freq_label]
 
+    st.header("PV System")
+    dc_capacity_kwp = st.number_input("Array DC capacity (kWp)", min_value=0.1, value=4.64, step=0.1)
+    global_efficiency = st.slider("Global DC efficiency", 0.0, 1.0, 0.85, step=0.01)
+    inverter_capacity_kw = st.number_input("Inverter AC rating (kW)", min_value=0.1, value=4.0, step=0.1)
+
     st.header("Irradiance source")
     source_label = st.radio(
         "Use clear-sky or upload measured data?",
@@ -360,12 +389,29 @@ df = pd.DataFrame({
 })
 
 
+# Simple PV performance model (global efficiency + inverter clipping)
+dc_kw = df["POA_Global"] / 1000.0 * dc_capacity_kwp * global_efficiency
+ac_kw = dc_kw.clip(upper=inverter_capacity_kw)
+df["DC_kW"] = dc_kw
+df["AC_kW"] = ac_kw
+
+
 # Daily totals in kWh/m^2/day for POA
 daily_poa_kwh = compute_daily_energy_kwh(df["POA_Global"])
 poa_summary = pd.DataFrame({
     "POA_kWh_per_m2": daily_poa_kwh,
 })
 monthly_summary = poa_summary.resample("MS").sum()
+
+# Daily energy for DC/AC outputs
+daily_dc_energy = integrate_power_kw_to_daily_energy(df["DC_kW"])
+daily_ac_energy = integrate_power_kw_to_daily_energy(df["AC_kW"])
+pv_summary = pd.DataFrame({
+    "DC_Energy_kWh": daily_dc_energy,
+    "AC_Energy_kWh": daily_ac_energy,
+    "Clipping_Loss_kWh": daily_dc_energy - daily_ac_energy,
+})
+monthly_pv_summary = pv_summary.resample("MS").sum()
 
 # KPI cards
 col1, col2, col3 = st.columns(3)
@@ -375,6 +421,14 @@ day_with_max = daily_poa_kwh.idxmax() if not daily_poa_kwh.empty else None
 col1.metric("Total POA (kWh/m²)", f"{total_kwh_m2:.1f}")
 col2.metric("Peak POA (W/m²)", f"{peak_poa:.0f}")
 col3.metric("Best day", f"{day_with_max.date() if day_with_max is not None else '—'}")
+
+col4, col5, col6 = st.columns(3)
+total_ac_energy = daily_ac_energy.sum()
+total_dc_energy = daily_dc_energy.sum()
+clipping_fraction = ((total_dc_energy - total_ac_energy) / total_dc_energy * 100.0) if total_dc_energy > 0 else 0.0
+col4.metric("Total AC energy (kWh)", f"{total_ac_energy:.1f}")
+col5.metric("Total DC energy (kWh)", f"{total_dc_energy:.1f}")
+col6.metric("Clipping loss (%)", f"{clipping_fraction:.1f}")
 
 
 # Plot time series (POA components)
@@ -398,6 +452,71 @@ with st.expander("Time series — POA components", expanded=True):
         file_name="poa_timeseries.csv",
         mime="text/csv",
         use_container_width=True,
+    )
+
+
+with st.expander("Time series — PV power", expanded=True):
+    pv_fig = go.Figure()
+    pv_fig.add_trace(go.Scatter(x=df.index, y=df["DC_kW"], name="DC Power", mode="lines"))
+    pv_fig.add_trace(go.Scatter(x=df.index, y=df["AC_kW"], name="AC Power (clipped)", mode="lines"))
+    pv_fig.update_layout(
+        xaxis_title="Time",
+        yaxis_title="Power (kW)",
+        hovermode="x unified",
+        height=400,
+        margin=dict(l=40, r=20, t=40, b=40),
+    )
+    st.plotly_chart(pv_fig, use_container_width=True)
+    st.download_button(
+        "Download PV power time series (CSV)",
+        data=dataframe_to_csv_bytes(df[["DC_kW", "AC_kW"]]),
+        file_name="pv_power_timeseries.csv",
+        mime="text/csv",
+        use_container_width=True,
+        key="pv_power_download",
+    )
+
+
+with st.expander("Daily energy tables", expanded=False):
+    st.subheader("POA irradiance")
+    st.dataframe(poa_summary)
+    st.download_button(
+        "Download daily POA energy (CSV)",
+        data=dataframe_to_csv_bytes(poa_summary),
+        file_name="poa_daily_energy.csv",
+        mime="text/csv",
+        use_container_width=True,
+        key="poa_daily_download",
+    )
+    st.subheader("PV output")
+    st.dataframe(pv_summary)
+    st.download_button(
+        "Download daily PV energy (CSV)",
+        data=dataframe_to_csv_bytes(pv_summary),
+        file_name="pv_daily_energy.csv",
+        mime="text/csv",
+        use_container_width=True,
+        key="pv_daily_download",
+    )
+    st.subheader("Monthly POA energy")
+    st.dataframe(monthly_summary.rename(columns={"POA_kWh_per_m2": "POA kWh/m²"}))
+    st.download_button(
+        "Download monthly POA energy (CSV)",
+        data=dataframe_to_csv_bytes(monthly_summary),
+        file_name="poa_monthly_energy.csv",
+        mime="text/csv",
+        use_container_width=True,
+        key="poa_monthly_download",
+    )
+    st.subheader("Monthly PV energy")
+    st.dataframe(monthly_pv_summary)
+    st.download_button(
+        "Download monthly PV energy (CSV)",
+        data=dataframe_to_csv_bytes(monthly_pv_summary),
+        file_name="pv_monthly_energy.csv",
+        mime="text/csv",
+        use_container_width=True,
+        key="pv_monthly_download",
     )
 
 # Daily totals bar
