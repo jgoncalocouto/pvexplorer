@@ -18,6 +18,9 @@ with st.sidebar:
     st.header("Location & Time")
     lat = st.number_input("Latitude (°)", value=38.7223, format="%.6f")  # default Lisbon
     lon = st.number_input("Longitude (°)", value=-9.1393, format="%.6f")
+    map_zoom = st.slider("Map zoom", min_value=1, max_value=15, value=10)
+    location_point = pd.DataFrame({"lat": [float(lat)], "lon": [float(lon)]})
+    st.map(location_point, zoom=map_zoom, use_container_width=True)
     tz = st.text_input("Timezone (IANA)", value="Europe/Lisbon")
     elevation = st.number_input("Elevation (m)", value=100, step=10)
     dates = st.date_input(
