@@ -10,14 +10,93 @@ import plotly.graph_objects as go
 from pvlib.location import Location
 import pvlib
 
+def build_azimuth_compass(angle_deg: float) -> go.Figure:
+    """Return a compass-style polar chart highlighting the chosen azimuth."""
+
+    base_angles = np.linspace(0, 360, 361)
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Scatterpolar(
+            r=np.ones_like(base_angles),
+            theta=base_angles,
+            mode="lines",
+            line=dict(color="#CCCCCC", width=1),
+            showlegend=False,
+            hoverinfo="skip",
+        )
+    )
+
+    for direction in [0, 90, 180, 270]:
+        fig.add_trace(
+            go.Scatterpolar(
+                r=[0, 1],
+                theta=[direction, direction],
+                mode="lines",
+                line=dict(color="#BBBBBB", width=1),
+                showlegend=False,
+                hoverinfo="skip",
+            )
+        )
+
+    fig.add_trace(
+        go.Scatterpolar(
+            r=[1.05, 1.05, 1.05, 1.05],
+            theta=[0, 90, 180, 270],
+            mode="text",
+            text=["N", "E", "S", "W"],
+            textfont=dict(size=16, color="#444444"),
+            showlegend=False,
+            hoverinfo="skip",
+        )
+    )
+
+    fig.add_trace(
+        go.Scatterpolar(
+            r=[0, 0.82],
+            theta=[angle_deg, angle_deg],
+            mode="lines",
+            line=dict(color="#FF8C00", width=6),
+            showlegend=False,
+            hoverinfo="skip",
+        )
+    )
+    fig.add_trace(
+        go.Scatterpolar(
+            r=[0.9],
+            theta=[angle_deg],
+            mode="markers",
+            marker=dict(color="#FF8C00", size=16, symbol="triangle-up"),
+            showlegend=False,
+            hoverinfo="skip",
+        )
+    )
+
+    fig.update_layout(
+        title=f"Azimuth: {angle_deg}°",
+        showlegend=False,
+        polar=dict(
+            angularaxis=dict(rotation=90, direction="clockwise", showticklabels=False, ticks=""),
+            radialaxis=dict(range=[0, 1.1], showticklabels=False, ticks="", showgrid=False, visible=False),
+        ),
+        margin=dict(l=20, r=20, t=60, b=20),
+        height=320,
+    )
+
+    return fig
+
+
 st.set_page_config(page_title="PV POA Irradiance (pvlib)", layout="wide")
 
 st.title("☀️ PV Plane-of-Array Irradiance — pvlib (clear-sky)")
 
 with st.sidebar:
     st.header("Location & Time")
-    lat = st.number_input("Latitude (°)", value=38.7223, format="%.6f")  # default Lisbon
-    lon = st.number_input("Longitude (°)", value=-9.1393, format="%.6f")
+    lat = st.number_input("Latitude (°)", value=41.4836, format="%.4f")  # default Lisbon
+    lon = st.number_input("Longitude (°)", value=-8.55, format="%.2f")
+    map_zoom = st.slider("Map zoom", min_value=1, max_value=15, value=10)
+    location_point = pd.DataFrame({"lat": [float(lat)], "lon": [float(lon)]})
+    st.map(location_point, zoom=map_zoom, use_container_width=True)
     tz = st.text_input("Timezone (IANA)", value="Europe/Lisbon")
     elevation = st.number_input("Elevation (m)", value=100, step=10)
     dates = st.date_input(
@@ -32,13 +111,22 @@ with st.sidebar:
         date_end = dates
 
     st.header("Array Geometry")
-    tilt = st.slider("Surface tilt (° from horizontal)", 0, 90, 25)
-    azimuth = st.slider("Surface azimuth (°; 180 = South, 0/360 = North, 90 = East, 270 = West)", 0, 360, 180)
-    albedo = st.slider("Ground albedo", 0.0, 0.9, 0.2, step=0.01)
+    tilt = st.slider("Surface tilt (° from horizontal)", 0, 90, 30)
+    azimuth = st.slider(
+        "Surface azimuth (°; 180 = South, 0/360 = North, 90 = East, 270 = West)",
+        0,
+        360,
+        200,
+    )
+    
+    st.subheader("Orientation preview")
+    st.plotly_chart(build_azimuth_compass(azimuth), width="stretch")
+    
+    albedo = st.slider("Ground albedo", 0.0, 0.9, 0.6, step=0.01)
 
     st.header("Sampling")
-    freq_label = st.selectbox("Time step", ["15 min", "30 min", "1H"], index=2)
-    freq = {"15 min": "15min", "30 min": "30min", "1H": "1H"}[freq_label]
+    freq_label = st.selectbox("Time step", ["15 min", "30 min", "1h"], index=2)
+    freq = {"15 min": "15min", "30 min": "30min", "1h": "1h"}[freq_label]
 
 st.markdown(
     """
@@ -46,6 +134,9 @@ This tool computes **clear-sky** irradiance using pvlib's Ineichen model and tra
 specified tilt and azimuth. It's a great first step to size PV and understand seasonal/diurnal patterns. Later, you can switch to
 measured or TMY weather to include clouds and real conditions.
 """)
+
+
+
 
 # Build time index
 start = pd.Timestamp.combine(pd.to_datetime(date_start), pd.Timestamp.min.time()).tz_localize(tz)
@@ -60,7 +151,9 @@ site = Location(latitude=lat, longitude=lon, tz=tz, altitude=elevation, name="Si
 solpos = site.get_solarposition(times)
 
 # Clear-sky (Ineichen)
-clearsky = site.get_clearsky(times, model="ineichen")  # returns GHI, DNI, DHI
+clearsky = site.get_clearsky(times, model="ineichen")  # returns ghi, dni, dhi
+# Standardize column names to upper-case for downstream access
+clearsky = clearsky.rename(columns=str.upper)
 
 # Airmass for temp model (optional - here just to demonstrate pipeline)
 pressure = pvlib.atmosphere.alt2pres(elevation)
