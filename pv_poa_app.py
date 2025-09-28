@@ -10,51 +10,6 @@ import plotly.graph_objects as go
 from pvlib.location import Location
 import pvlib
 
-st.set_page_config(page_title="PV POA Irradiance (pvlib)", layout="wide")
-
-st.title("☀️ PV Plane-of-Array Irradiance — pvlib (clear-sky)")
-
-with st.sidebar:
-    st.header("Location & Time")
-    lat = st.number_input("Latitude (°)", value=38.7223, format="%.6f")  # default Lisbon
-    lon = st.number_input("Longitude (°)", value=-9.1393, format="%.6f")
-    map_zoom = st.slider("Map zoom", min_value=1, max_value=15, value=10)
-    location_point = pd.DataFrame({"lat": [float(lat)], "lon": [float(lon)]})
-    st.map(location_point, zoom=map_zoom, use_container_width=True)
-    tz = st.text_input("Timezone (IANA)", value="Europe/Lisbon")
-    elevation = st.number_input("Elevation (m)", value=100, step=10)
-    dates = st.date_input(
-        "Date range",
-        value=(pd.Timestamp.today(tz=tz).date().replace(month=1, day=1),
-               pd.Timestamp.today(tz=tz).date().replace(month=12, day=31)),
-    )
-    if isinstance(dates, tuple):
-        date_start, date_end = dates
-    else:
-        date_start = dates
-        date_end = dates
-
-    st.header("Array Geometry")
-    tilt = st.slider("Surface tilt (° from horizontal)", 0, 90, 25)
-    azimuth = st.slider(
-        "Surface azimuth (°; 180 = South, 0/360 = North, 90 = East, 270 = West)",
-        0,
-        360,
-        180,
-    )
-    albedo = st.slider("Ground albedo", 0.0, 0.9, 0.2, step=0.01)
-
-    st.header("Sampling")
-    freq_label = st.selectbox("Time step", ["15 min", "30 min", "1H"], index=2)
-    freq = {"15 min": "15min", "30 min": "30min", "1H": "1H"}[freq_label]
-
-st.markdown(
-    """
-This tool computes **clear-sky** irradiance using pvlib's Ineichen model and transposes it to the **plane-of-array (POA)** for your
-specified tilt and azimuth. It's a great first step to size PV and understand seasonal/diurnal patterns. Later, you can switch to
-measured or TMY weather to include clouds and real conditions.
-""")
-
 def build_azimuth_compass(angle_deg: float) -> go.Figure:
     """Return a compass-style polar chart highlighting the chosen azimuth."""
 
@@ -131,8 +86,56 @@ def build_azimuth_compass(angle_deg: float) -> go.Figure:
     return fig
 
 
-st.subheader("Orientation preview")
-st.plotly_chart(build_azimuth_compass(azimuth), use_container_width=True)
+st.set_page_config(page_title="PV POA Irradiance (pvlib)", layout="wide")
+
+st.title("☀️ PV Plane-of-Array Irradiance — pvlib (clear-sky)")
+
+with st.sidebar:
+    st.header("Location & Time")
+    lat = st.number_input("Latitude (°)", value=41.4836, format="%.4f")  # default Lisbon
+    lon = st.number_input("Longitude (°)", value=-8.55, format="%.2f")
+    map_zoom = st.slider("Map zoom", min_value=1, max_value=15, value=10)
+    location_point = pd.DataFrame({"lat": [float(lat)], "lon": [float(lon)]})
+    st.map(location_point, zoom=map_zoom, use_container_width=True)
+    tz = st.text_input("Timezone (IANA)", value="Europe/Lisbon")
+    elevation = st.number_input("Elevation (m)", value=100, step=10)
+    dates = st.date_input(
+        "Date range",
+        value=(pd.Timestamp.today(tz=tz).date().replace(month=1, day=1),
+               pd.Timestamp.today(tz=tz).date().replace(month=12, day=31)),
+    )
+    if isinstance(dates, tuple):
+        date_start, date_end = dates
+    else:
+        date_start = dates
+        date_end = dates
+
+    st.header("Array Geometry")
+    tilt = st.slider("Surface tilt (° from horizontal)", 0, 90, 30)
+    azimuth = st.slider(
+        "Surface azimuth (°; 180 = South, 0/360 = North, 90 = East, 270 = West)",
+        0,
+        360,
+        200,
+    )
+    
+    st.subheader("Orientation preview")
+    st.plotly_chart(build_azimuth_compass(azimuth), width="stretch")
+    
+    albedo = st.slider("Ground albedo", 0.0, 0.9, 0.6, step=0.01)
+
+    st.header("Sampling")
+    freq_label = st.selectbox("Time step", ["15 min", "30 min", "1h"], index=2)
+    freq = {"15 min": "15min", "30 min": "30min", "1h": "1h"}[freq_label]
+
+st.markdown(
+    """
+This tool computes **clear-sky** irradiance using pvlib's Ineichen model and transposes it to the **plane-of-array (POA)** for your
+specified tilt and azimuth. It's a great first step to size PV and understand seasonal/diurnal patterns. Later, you can switch to
+measured or TMY weather to include clouds and real conditions.
+""")
+
+
 
 
 # Build time index
