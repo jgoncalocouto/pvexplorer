@@ -3,7 +3,7 @@
 # Streamlit app to estimate plane-of-array (POA) irradiance using pvlib clearsky models
 # Run with: streamlit run pv_poa_app.py
 
-from typing import Optional
+from typing import Optional, List, Tuple
 
 import pandas as pd
 import numpy as np
@@ -72,6 +72,61 @@ def integrate_power_kw_to_daily_energy(power_kw: pd.Series) -> pd.Series:
     daily = pd.Series(energy, index=idx).resample("D").sum(min_count=1)
     daily.index.name = "date"
     return daily
+
+
+def align_timestamp_to_index(ts: pd.Timestamp, index: pd.DatetimeIndex) -> pd.Timestamp:
+    """Return *ts* converted to the timezone of *index* (if any)."""
+
+    timestamp = pd.Timestamp(ts)
+    idx_tz = index.tz if isinstance(index, pd.DatetimeIndex) else None
+
+    if idx_tz is None:
+        if timestamp.tzinfo is not None:
+            return timestamp.tz_convert(None)
+        return timestamp
+
+    if timestamp.tzinfo is None:
+        return timestamp.tz_localize(idx_tz)
+    return timestamp.tz_convert(idx_tz)
+
+
+def select_representative_days(daily_series: pd.Series) -> List[Tuple[str, pd.Timestamp]]:
+    """Pick days representing distribution extremes and spread for plotting."""
+
+    if daily_series.empty:
+        return []
+
+    selections: List[Tuple[str, pd.Timestamp]] = []
+
+    try:
+        best_day = daily_series.idxmax()
+        selections.append(("Best day", pd.Timestamp(best_day)))
+    except ValueError:
+        pass
+
+    try:
+        worst_day = daily_series.idxmin()
+        selections.append(("Worst day", pd.Timestamp(worst_day)))
+    except ValueError:
+        pass
+
+    median_value = daily_series.median()
+    if not pd.isna(median_value):
+        median_day = daily_series.sub(median_value).abs().idxmin()
+        selections.append(("Median day", pd.Timestamp(median_day)))
+
+        sigma = daily_series.std()
+        if not pd.isna(sigma) and sigma > 0:
+            low_target = median_value - 2 * sigma
+            high_target = median_value + 2 * sigma
+            low_day = daily_series.sub(low_target).abs().idxmin()
+            high_day = daily_series.sub(high_target).abs().idxmin()
+            selections.append(("Median − 2σ day", pd.Timestamp(low_day)))
+            selections.append(("Median + 2σ day", pd.Timestamp(high_day)))
+
+    # Filter out NaT entries that may slip through idx* lookups
+    filtered = [(label, day) for label, day in selections if not pd.isna(day)]
+    return filtered
 
 
 @st.cache_data(show_spinner=False)
@@ -475,6 +530,43 @@ with st.expander("Time series — PV power", expanded=True):
         use_container_width=True,
         key="pv_power_download",
     )
+
+
+with st.expander("Daily profile — AC power", expanded=False):
+    representative_days = select_representative_days(daily_ac_energy)
+    if not representative_days:
+        st.info("Not enough daily AC energy data to build representative profiles.")
+    else:
+        profile_fig = go.Figure()
+        for label, day in representative_days:
+            aligned_day = align_timestamp_to_index(day, df.index)
+            mask = df.index.normalize() == aligned_day.normalize()
+            day_ac = df.loc[mask, "AC_kW"]
+            if day_ac.empty:
+                continue
+
+            hours = ((day_ac.index - day_ac.index.normalize()) / pd.Timedelta(hours=1)).to_numpy()
+            profile_fig.add_trace(
+                go.Scatter(
+                    x=hours,
+                    y=day_ac.values,
+                    mode="lines",
+                    name=f"{label} ({aligned_day.date()})",
+                )
+            )
+
+        if not profile_fig.data:
+            st.info("Unable to plot daily AC power profiles for the current dataset.")
+        else:
+            profile_fig.update_layout(
+                xaxis_title="Hour of day",
+                yaxis_title="AC power (kW)",
+                hovermode="x unified",
+                height=400,
+                margin=dict(l=40, r=20, t=40, b=40),
+            )
+            profile_fig.update_xaxes(range=[0, 24])
+            st.plotly_chart(profile_fig, use_container_width=True)
 
 
 with st.expander("Daily energy tables", expanded=False):
