@@ -50,6 +50,13 @@ def compute_daily_energy_kwh(series: pd.Series) -> pd.Series:
     return daily
 
 
+@st.cache_data(show_spinner=False)
+def dataframe_to_csv_bytes(df: pd.DataFrame) -> bytes:
+    """Serialize a dataframe (with index) to UTF-8 encoded CSV bytes for download."""
+
+    return df.to_csv(index=True).encode("utf-8")
+
+
 def process_csv_irradiance(
     raw_df: pd.DataFrame,
     timestamp_col: str,
@@ -385,6 +392,13 @@ with st.expander("Time series — POA components", expanded=True):
         margin=dict(l=40, r=20, t=40, b=40),
     )
     st.plotly_chart(fig, use_container_width=True)
+    st.download_button(
+        "Download POA time series (CSV)",
+        data=dataframe_to_csv_bytes(df),
+        file_name="poa_timeseries.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
 
 # Daily totals bar
 with st.expander("Daily POA energy (kWh/m²/day)", expanded=False):
@@ -398,9 +412,24 @@ with st.expander("Daily POA energy (kWh/m²/day)", expanded=False):
         margin=dict(l=40, r=20, t=40, b=40),
     )
     st.plotly_chart(bar, use_container_width=True)
+    st.download_button(
+        "Download daily POA totals (CSV)",
+        data=dataframe_to_csv_bytes(poa_summary),
+        file_name="poa_daily_totals.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
 
 # Monthly totals table
 with st.expander("Monthly totals (kWh/m² per month)", expanded=False):
-    st.dataframe(monthly_summary.rename(columns={"POA_kWh_per_m2": "POA kWh/m²"}))
+    monthly_display = monthly_summary.rename(columns={"POA_kWh_per_m2": "POA kWh/m²"})
+    st.dataframe(monthly_display)
+    st.download_button(
+        "Download monthly POA totals (CSV)",
+        data=dataframe_to_csv_bytes(monthly_summary),
+        file_name="poa_monthly_totals.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
 
 st.caption("Model: pvlib Ineichen clear-sky or user-provided CSV irradiance (GHI/DNI/DHI). CSV timestamps are shifted to the selected timezone and present year.")
