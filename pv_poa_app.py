@@ -115,15 +115,6 @@ def select_representative_days(daily_series: pd.Series) -> List[Tuple[str, pd.Ti
         median_day = daily_series.sub(median_value).abs().idxmin()
         selections.append(("Median day", pd.Timestamp(median_day)))
 
-        sigma = daily_series.std()
-        if not pd.isna(sigma) and sigma > 0:
-            low_target = median_value - 2 * sigma
-            high_target = median_value + 2 * sigma
-            low_day = daily_series.sub(low_target).abs().idxmin()
-            high_day = daily_series.sub(high_target).abs().idxmin()
-            selections.append(("Median − 2σ day", pd.Timestamp(low_day)))
-            selections.append(("Median + 2σ day", pd.Timestamp(high_day)))
-
     # Filter out NaT entries that may slip through idx* lookups
     filtered = [(label, day) for label, day in selections if not pd.isna(day)]
     return filtered
@@ -273,14 +264,62 @@ csv_df: Optional[pd.DataFrame] = None
 timestamp_col = ghi_col = dni_col = dhi_col = None
 
 with st.sidebar:
-    st.header("Location & Time")
-    lat = st.number_input("Latitude (°)", value=41.4836, format="%.4f")  # default Lisbon
+    
+    st.header("Solar Radiation Data source")
+    source_label = st.radio(
+        "Use clear-sky or upload measured data?",
+        (
+            "Clear-sky (pvlib Ineichen)",
+            "Upload CSV (map to GHI/DNI/DHI)",
+        ),
+    )
+    if source_label == "Upload CSV (map to GHI/DNI/DHI)":
+      uploaded_file = st.file_uploader("CSV with irradiance columns", type=["csv"])
+      if uploaded_file is not None:
+          csv_df = pd.read_csv(uploaded_file)
+          st.caption(f"Loaded {csv_df.shape[0]} rows × {csv_df.shape[1]} columns")
+          if not csv_df.empty:
+              timestamp_col = st.selectbox(
+                  "Timestamp column",
+                  options=csv_df.columns.tolist(),
+                  key="timestamp_column_select",
+              )
+              remaining = [c for c in csv_df.columns if c != timestamp_col]
+              if len(remaining) < 3:
+                  st.warning("Pick a CSV with columns for GHI, DNI, and DHI.")
+              else:
+                  ghi_col = st.selectbox(
+                      "Column → GHI",
+                      options=remaining,
+                      key="ghi_column_select",
+                  )
+                  remaining_dni = [c for c in remaining if c != ghi_col]
+                  dni_col = st.selectbox(
+                      "Column → DNI",
+                      options=remaining_dni,
+                      key="dni_column_select",
+                  )
+                  remaining_dhi = [c for c in remaining_dni if c != dni_col]
+                  if remaining_dhi:
+                      dhi_col = st.selectbox(
+                          "Column → DHI",
+                          options=remaining_dhi,
+                          key="dhi_column_select",
+                      )
+                  else:
+                      st.warning("Select distinct columns for each irradiance component.")
+          else:
+              st.warning("Uploaded file is empty.")
+
+    st.header("Location")
+    lat = st.number_input("Latitude (°)", value=41.4836, format="%.4f")
     lon = st.number_input("Longitude (°)", value=-8.55, format="%.2f")
-    map_zoom = st.slider("Map zoom", min_value=1, max_value=15, value=10)
-    location_point = pd.DataFrame({"lat": [float(lat)], "lon": [float(lon)]})
-    st.map(location_point, zoom=map_zoom, use_container_width=True)
-    tz = st.text_input("Timezone (IANA)", value="Europe/Lisbon")
     elevation = st.number_input("Elevation (m)", value=100, step=10)
+    location_point = pd.DataFrame({"lat": [float(lat)], "lon": [float(lon)]})
+    st.map(location_point, zoom=10, use_container_width=True)
+    
+    st.header("Time")
+    tz = st.text_input("Timezone (IANA)", value="Europe/Lisbon")
     dates = st.date_input(
         "Date range",
         value=(pd.Timestamp.today(tz=tz).date().replace(month=1, day=1),
@@ -291,8 +330,17 @@ with st.sidebar:
     else:
         date_start = dates
         date_end = dates
+    freq_label = st.selectbox("Time step", ["15 min", "30 min", "1h"], index=2)
+    freq = {"15 min": "15min", "30 min": "30min", "1h": "1h"}[freq_label]
 
-    st.header("Array Geometry")
+    st.header("PV Array")
+    st.subheader("Capacity")
+    dc_capacity_kwp = st.number_input("Array DC capacity (kWp)", min_value=0.1, value=4.64, step=0.1)
+    inverter_capacity_kw = st.number_input("Inverter AC rating (kW)", min_value=0.1, value=4.0, step=0.1)
+    global_efficiency = st.slider("Global DC efficiency", 0.0, 1.0, 0.85, step=0.01)
+    
+    st.subheader("Geometry")
+    albedo = st.slider("Ground albedo", 0.0, 0.9, 0.6, step=0.01)
     tilt = st.slider("Surface tilt (° from horizontal)", 0, 90, 30)
     azimuth = st.slider(
         "Surface azimuth (°; 180 = South, 0/360 = North, 90 = East, 270 = West)",
@@ -300,71 +348,16 @@ with st.sidebar:
         360,
         200,
     )
-
-    st.subheader("Orientation preview")
     st.plotly_chart(build_azimuth_compass(azimuth), width="stretch")
 
-    albedo = st.slider("Ground albedo", 0.0, 0.9, 0.6, step=0.01)
 
-    st.header("Sampling")
-    freq_label = st.selectbox("Time step", ["15 min", "30 min", "1h"], index=2)
-    freq = {"15 min": "15min", "30 min": "30min", "1h": "1h"}[freq_label]
 
-    st.header("PV System")
-    dc_capacity_kwp = st.number_input("Array DC capacity (kWp)", min_value=0.1, value=4.64, step=0.1)
-    global_efficiency = st.slider("Global DC efficiency", 0.0, 1.0, 0.85, step=0.01)
-    inverter_capacity_kw = st.number_input("Inverter AC rating (kW)", min_value=0.1, value=4.0, step=0.1)
 
-    st.header("Irradiance source")
-    source_label = st.radio(
-        "Use clear-sky or upload measured data?",
-        (
-            "Clear-sky (pvlib Ineichen)",
-            "Upload CSV (map to GHI/DNI/DHI)",
-        ),
-    )
 
-    if source_label == "Upload CSV (map to GHI/DNI/DHI)":
-        uploaded_file = st.file_uploader("CSV with irradiance columns", type=["csv"])
-        if uploaded_file is not None:
-            csv_df = pd.read_csv(uploaded_file)
-            st.caption(f"Loaded {csv_df.shape[0]} rows × {csv_df.shape[1]} columns")
-            if not csv_df.empty:
-                timestamp_col = st.selectbox(
-                    "Timestamp column",
-                    options=csv_df.columns.tolist(),
-                    key="timestamp_column_select",
-                )
-                remaining = [c for c in csv_df.columns if c != timestamp_col]
-                if len(remaining) < 3:
-                    st.warning("Pick a CSV with columns for GHI, DNI, and DHI.")
-                else:
-                    ghi_col = st.selectbox(
-                        "Column → GHI",
-                        options=remaining,
-                        key="ghi_column_select",
-                    )
-                    remaining_dni = [c for c in remaining if c != ghi_col]
-                    dni_col = st.selectbox(
-                        "Column → DNI",
-                        options=remaining_dni,
-                        key="dni_column_select",
-                    )
-                    remaining_dhi = [c for c in remaining_dni if c != dni_col]
-                    if remaining_dhi:
-                        dhi_col = st.selectbox(
-                            "Column → DHI",
-                            options=remaining_dhi,
-                            key="dhi_column_select",
-                        )
-                    else:
-                        st.warning("Select distinct columns for each irradiance component.")
-            else:
-                st.warning("Uploaded file is empty.")
 
 st.markdown(
     """
-This tool computes plane-of-array (POA) irradiance using either pvlib's **clear-sky Ineichen model** or **user-supplied CSV irradiance data**. Map your CSV columns to GHI/DNI/DHI to evaluate measured or TMY datasets, or stick with the clear-sky baseline for quick feasibility scans.
+Calculate plane-of-array (POA) irradiance using pvlib's **clear-sky Ineichen model** or a **user-supplied CSV irradiance data** (which may contain the effect of clouds).
 """)
 
 
