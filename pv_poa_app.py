@@ -314,7 +314,7 @@ with st.sidebar:
     st.header("Location")
     lat = st.number_input("Latitude (°)", value=41.4836, format="%.4f")
     lon = st.number_input("Longitude (°)", value=-8.55, format="%.2f")
-    elevation = st.number_input("Elevation (m)", value=100, step=10)
+    elevation = st.number_input("Elevation (m)", value=133, step=1)
     location_point = pd.DataFrame({"lat": [float(lat)], "lon": [float(lon)]})
     st.map(location_point, zoom=10, use_container_width=True)
     
@@ -335,11 +335,16 @@ with st.sidebar:
 
     st.header("PV Array")
     st.subheader("Capacity")
-    dc_capacity_kwp = st.number_input("Array DC capacity (kWp)", min_value=0.1, value=4.64, step=0.1)
+    A_single_pv = st.number_input("Area of a single pannel (m^2)", value=2.58, format="%.2f")
+    P_single_pv = st.number_input("Peak capacity of a single pannel (Wp)", value=580, format="%2d")
+    N_pannels = st.number_input("Number of pannels in the array", value=8)
+    dc_capacity_kwp = (P_single_pv/1000)*N_pannels
+    A_pannels=A_single_pv*N_pannels
+    
     inverter_capacity_kw = st.number_input("Inverter AC rating (kW)", min_value=0.1, value=4.0, step=0.1)
     global_efficiency = st.slider("Global DC efficiency", 0.0, 1.0, 0.85, step=0.01)
     
-    st.subheader("Geometry")
+    st.subheader("Installation")
     albedo = st.slider("Ground albedo", 0.0, 0.9, 0.6, step=0.01)
     tilt = st.slider("Surface tilt (° from horizontal)", 0, 90, 30)
     azimuth = st.slider(
@@ -464,10 +469,11 @@ monthly_pv_summary = pv_summary.resample("MS").sum()
 # KPI cards
 col1, col2, col3 = st.columns(3)
 total_kwh_m2 = daily_poa_kwh.sum()
+total_kwh = total_kwh_m2*A_pannels
 peak_poa = df["POA_Global"].max()
 day_with_max = daily_poa_kwh.idxmax() if not daily_poa_kwh.empty else None
-col1.metric("Total POA (kWh/m²)", f"{total_kwh_m2:.1f}")
-col2.metric("Peak POA (W/m²)", f"{peak_poa:.0f}")
+col1.metric("Total Solar Energy Received (kWh)", f"{total_kwh:.1f}")
+col2.metric("Peak Irradiance (W/m²)", f"{peak_poa:.0f}")
 col3.metric("Best day", f"{day_with_max.date() if day_with_max is not None else '—'}")
 
 col4, col5, col6 = st.columns(3)
