@@ -3,7 +3,7 @@
 # Streamlit app to estimate plane-of-array (POA) irradiance using pvlib clearsky models
 # Run with: streamlit run pv_poa_app.py
 
-from typing import Optional
+from typing import Optional, List, Tuple
 
 import pandas as pd
 import numpy as np
@@ -48,6 +48,76 @@ def compute_daily_energy_kwh(series: pd.Series) -> pd.Series:
     daily = pd.Series(energy, index=idx).resample("D").sum(min_count=1)
     daily.index.name = "date"
     return daily
+
+
+def integrate_power_kw_to_daily_energy(power_kw: pd.Series) -> pd.Series:
+    """Integrate a kW power time-series to daily kWh using forward differences."""
+
+    if power_kw.empty:
+        return pd.Series(dtype=float)
+
+    idx = power_kw.index
+    values = power_kw.to_numpy(dtype=float)
+
+    if len(values) == 1:
+        delta_hours = np.zeros_like(values)
+    else:
+        diffs = np.diff(idx.asi8) / NS_PER_HOUR
+        positive_diffs = diffs[diffs > 0]
+        fallback = float(np.median(positive_diffs)) if positive_diffs.size else 1.0
+        diffs = np.where(diffs > 0, diffs, fallback)
+        delta_hours = np.append(diffs, fallback)
+
+    energy = values * delta_hours
+    daily = pd.Series(energy, index=idx).resample("D").sum(min_count=1)
+    daily.index.name = "date"
+    return daily
+
+
+def align_timestamp_to_index(ts: pd.Timestamp, index: pd.DatetimeIndex) -> pd.Timestamp:
+    """Return *ts* converted to the timezone of *index* (if any)."""
+
+    timestamp = pd.Timestamp(ts)
+    idx_tz = index.tz if isinstance(index, pd.DatetimeIndex) else None
+
+    if idx_tz is None:
+        if timestamp.tzinfo is not None:
+            return timestamp.tz_convert(None)
+        return timestamp
+
+    if timestamp.tzinfo is None:
+        return timestamp.tz_localize(idx_tz)
+    return timestamp.tz_convert(idx_tz)
+
+
+def select_representative_days(daily_series: pd.Series) -> List[Tuple[str, pd.Timestamp]]:
+    """Pick days representing distribution extremes and spread for plotting."""
+
+    if daily_series.empty:
+        return []
+
+    selections: List[Tuple[str, pd.Timestamp]] = []
+
+    try:
+        best_day = daily_series.idxmax()
+        selections.append(("Best day", pd.Timestamp(best_day)))
+    except ValueError:
+        pass
+
+    try:
+        worst_day = daily_series.idxmin()
+        selections.append(("Worst day", pd.Timestamp(worst_day)))
+    except ValueError:
+        pass
+
+    median_value = daily_series.median()
+    if not pd.isna(median_value):
+        median_day = daily_series.sub(median_value).abs().idxmin()
+        selections.append(("Median day", pd.Timestamp(median_day)))
+
+    # Filter out NaT entries that may slip through idx* lookups
+    filtered = [(label, day) for label, day in selections if not pd.isna(day)]
+    return filtered
 
 
 @st.cache_data(show_spinner=False)
@@ -194,14 +264,62 @@ csv_df: Optional[pd.DataFrame] = None
 timestamp_col = ghi_col = dni_col = dhi_col = None
 
 with st.sidebar:
-    st.header("Location & Time")
-    lat = st.number_input("Latitude (°)", value=41.4836, format="%.4f")  # default Lisbon
+    
+    st.header("Solar Radiation Data source")
+    source_label = st.radio(
+        "Use clear-sky or upload measured data?",
+        (
+            "Clear-sky (pvlib Ineichen)",
+            "Upload CSV (map to GHI/DNI/DHI)",
+        ),
+    )
+    if source_label == "Upload CSV (map to GHI/DNI/DHI)":
+      uploaded_file = st.file_uploader("CSV with irradiance columns", type=["csv"])
+      if uploaded_file is not None:
+          csv_df = pd.read_csv(uploaded_file)
+          st.caption(f"Loaded {csv_df.shape[0]} rows × {csv_df.shape[1]} columns")
+          if not csv_df.empty:
+              timestamp_col = st.selectbox(
+                  "Timestamp column",
+                  options=csv_df.columns.tolist(),
+                  key="timestamp_column_select",
+              )
+              remaining = [c for c in csv_df.columns if c != timestamp_col]
+              if len(remaining) < 3:
+                  st.warning("Pick a CSV with columns for GHI, DNI, and DHI.")
+              else:
+                  ghi_col = st.selectbox(
+                      "Column → GHI",
+                      options=remaining,
+                      key="ghi_column_select",
+                  )
+                  remaining_dni = [c for c in remaining if c != ghi_col]
+                  dni_col = st.selectbox(
+                      "Column → DNI",
+                      options=remaining_dni,
+                      key="dni_column_select",
+                  )
+                  remaining_dhi = [c for c in remaining_dni if c != dni_col]
+                  if remaining_dhi:
+                      dhi_col = st.selectbox(
+                          "Column → DHI",
+                          options=remaining_dhi,
+                          key="dhi_column_select",
+                      )
+                  else:
+                      st.warning("Select distinct columns for each irradiance component.")
+          else:
+              st.warning("Uploaded file is empty.")
+
+    st.header("Location")
+    lat = st.number_input("Latitude (°)", value=41.4836, format="%.4f")
     lon = st.number_input("Longitude (°)", value=-8.55, format="%.2f")
-    map_zoom = st.slider("Map zoom", min_value=1, max_value=15, value=10)
+    elevation = st.number_input("Elevation (m)", value=133, step=1)
     location_point = pd.DataFrame({"lat": [float(lat)], "lon": [float(lon)]})
-    st.map(location_point, zoom=map_zoom, use_container_width=True)
+    st.map(location_point, zoom=10, use_container_width=True)
+    
+    st.header("Time")
     tz = st.text_input("Timezone (IANA)", value="Europe/Lisbon")
-    elevation = st.number_input("Elevation (m)", value=100, step=10)
     dates = st.date_input(
         "Date range",
         value=(pd.Timestamp.today(tz=tz).date().replace(month=1, day=1),
@@ -212,8 +330,22 @@ with st.sidebar:
     else:
         date_start = dates
         date_end = dates
+    freq_label = st.selectbox("Time step", ["15 min", "30 min", "1h"], index=2)
+    freq = {"15 min": "15min", "30 min": "30min", "1h": "1h"}[freq_label]
 
-    st.header("Array Geometry")
+    st.header("PV Array")
+    st.subheader("Capacity")
+    A_single_pv = st.number_input("Area of a single pannel (m^2)", value=2.58, format="%.2f")
+    P_single_pv = st.number_input("Peak capacity of a single pannel (Wp)", value=580, format="%2d")
+    N_pannels = st.number_input("Number of pannels in the array", value=8)
+    dc_capacity_kwp = (P_single_pv/1000)*N_pannels
+    A_pannels=A_single_pv*N_pannels
+    
+    inverter_capacity_kw = st.number_input("Inverter AC rating (kW)", min_value=0.1, value=4.0, step=0.1)
+    global_efficiency = st.slider("Global DC efficiency", 0.0, 1.0, 0.85, step=0.01)
+    
+    st.subheader("Installation")
+    albedo = st.slider("Ground albedo", 0.0, 0.9, 0.6, step=0.01)
     tilt = st.slider("Surface tilt (° from horizontal)", 0, 90, 30)
     azimuth = st.slider(
         "Surface azimuth (°; 180 = South, 0/360 = North, 90 = East, 270 = West)",
@@ -221,66 +353,16 @@ with st.sidebar:
         360,
         200,
     )
-
-    st.subheader("Orientation preview")
     st.plotly_chart(build_azimuth_compass(azimuth), width="stretch")
 
-    albedo = st.slider("Ground albedo", 0.0, 0.9, 0.6, step=0.01)
 
-    st.header("Sampling")
-    freq_label = st.selectbox("Time step", ["15 min", "30 min", "1h"], index=2)
-    freq = {"15 min": "15min", "30 min": "30min", "1h": "1h"}[freq_label]
 
-    st.header("Irradiance source")
-    source_label = st.radio(
-        "Use clear-sky or upload measured data?",
-        (
-            "Clear-sky (pvlib Ineichen)",
-            "Upload CSV (map to GHI/DNI/DHI)",
-        ),
-    )
 
-    if source_label == "Upload CSV (map to GHI/DNI/DHI)":
-        uploaded_file = st.file_uploader("CSV with irradiance columns", type=["csv"])
-        if uploaded_file is not None:
-            csv_df = pd.read_csv(uploaded_file)
-            st.caption(f"Loaded {csv_df.shape[0]} rows × {csv_df.shape[1]} columns")
-            if not csv_df.empty:
-                timestamp_col = st.selectbox(
-                    "Timestamp column",
-                    options=csv_df.columns.tolist(),
-                    key="timestamp_column_select",
-                )
-                remaining = [c for c in csv_df.columns if c != timestamp_col]
-                if len(remaining) < 3:
-                    st.warning("Pick a CSV with columns for GHI, DNI, and DHI.")
-                else:
-                    ghi_col = st.selectbox(
-                        "Column → GHI",
-                        options=remaining,
-                        key="ghi_column_select",
-                    )
-                    remaining_dni = [c for c in remaining if c != ghi_col]
-                    dni_col = st.selectbox(
-                        "Column → DNI",
-                        options=remaining_dni,
-                        key="dni_column_select",
-                    )
-                    remaining_dhi = [c for c in remaining_dni if c != dni_col]
-                    if remaining_dhi:
-                        dhi_col = st.selectbox(
-                            "Column → DHI",
-                            options=remaining_dhi,
-                            key="dhi_column_select",
-                        )
-                    else:
-                        st.warning("Select distinct columns for each irradiance component.")
-            else:
-                st.warning("Uploaded file is empty.")
+
 
 st.markdown(
     """
-This tool computes plane-of-array (POA) irradiance using either pvlib's **clear-sky Ineichen model** or **user-supplied CSV irradiance data**. Map your CSV columns to GHI/DNI/DHI to evaluate measured or TMY datasets, or stick with the clear-sky baseline for quick feasibility scans.
+Calculate plane-of-array (POA) irradiance using pvlib's **clear-sky Ineichen model** or a **user-supplied CSV irradiance data** (which may contain the effect of clouds).
 """)
 
 
@@ -360,6 +442,13 @@ df = pd.DataFrame({
 })
 
 
+# Simple PV performance model (global efficiency + inverter clipping)
+dc_kw = df["POA_Global"] / 1000.0 * dc_capacity_kwp * global_efficiency
+ac_kw = dc_kw.clip(upper=inverter_capacity_kw)
+df["DC_kW"] = dc_kw
+df["AC_kW"] = ac_kw
+
+
 # Daily totals in kWh/m^2/day for POA
 daily_poa_kwh = compute_daily_energy_kwh(df["POA_Global"])
 poa_summary = pd.DataFrame({
@@ -367,14 +456,33 @@ poa_summary = pd.DataFrame({
 })
 monthly_summary = poa_summary.resample("MS").sum()
 
+# Daily energy for DC/AC outputs
+daily_dc_energy = integrate_power_kw_to_daily_energy(df["DC_kW"])
+daily_ac_energy = integrate_power_kw_to_daily_energy(df["AC_kW"])
+pv_summary = pd.DataFrame({
+    "DC_Energy_kWh": daily_dc_energy,
+    "AC_Energy_kWh": daily_ac_energy,
+    "Clipping_Loss_kWh": daily_dc_energy - daily_ac_energy,
+})
+monthly_pv_summary = pv_summary.resample("MS").sum()
+
 # KPI cards
 col1, col2, col3 = st.columns(3)
 total_kwh_m2 = daily_poa_kwh.sum()
+total_kwh = total_kwh_m2*A_pannels
 peak_poa = df["POA_Global"].max()
 day_with_max = daily_poa_kwh.idxmax() if not daily_poa_kwh.empty else None
-col1.metric("Total POA (kWh/m²)", f"{total_kwh_m2:.1f}")
-col2.metric("Peak POA (W/m²)", f"{peak_poa:.0f}")
+col1.metric("Total Solar Energy Received (kWh)", f"{total_kwh:.1f}")
+col2.metric("Peak Irradiance (W/m²)", f"{peak_poa:.0f}")
 col3.metric("Best day", f"{day_with_max.date() if day_with_max is not None else '—'}")
+
+col4, col5, col6 = st.columns(3)
+total_ac_energy = daily_ac_energy.sum()
+total_dc_energy = daily_dc_energy.sum()
+clipping_fraction = ((total_dc_energy - total_ac_energy) / total_dc_energy * 100.0) if total_dc_energy > 0 else 0.0
+col4.metric("Total AC energy (kWh)", f"{total_ac_energy:.1f}")
+col5.metric("Total DC energy (kWh)", f"{total_dc_energy:.1f}")
+col6.metric("Clipping loss (%)", f"{clipping_fraction:.1f}")
 
 
 # Plot time series (POA components)
@@ -398,6 +506,108 @@ with st.expander("Time series — POA components", expanded=True):
         file_name="poa_timeseries.csv",
         mime="text/csv",
         use_container_width=True,
+    )
+
+
+with st.expander("Time series — PV power", expanded=True):
+    pv_fig = go.Figure()
+    pv_fig.add_trace(go.Scatter(x=df.index, y=df["DC_kW"], name="DC Power", mode="lines"))
+    pv_fig.add_trace(go.Scatter(x=df.index, y=df["AC_kW"], name="AC Power (clipped)", mode="lines"))
+    pv_fig.update_layout(
+        xaxis_title="Time",
+        yaxis_title="Power (kW)",
+        hovermode="x unified",
+        height=400,
+        margin=dict(l=40, r=20, t=40, b=40),
+    )
+    st.plotly_chart(pv_fig, use_container_width=True)
+    st.download_button(
+        "Download PV power time series (CSV)",
+        data=dataframe_to_csv_bytes(df[["DC_kW", "AC_kW"]]),
+        file_name="pv_power_timeseries.csv",
+        mime="text/csv",
+        use_container_width=True,
+        key="pv_power_download",
+    )
+
+
+with st.expander("Daily profile — AC power", expanded=False):
+    representative_days = select_representative_days(daily_ac_energy)
+    if not representative_days:
+        st.info("Not enough daily AC energy data to build representative profiles.")
+    else:
+        profile_fig = go.Figure()
+        for label, day in representative_days:
+            aligned_day = align_timestamp_to_index(day, df.index)
+            mask = df.index.normalize() == aligned_day.normalize()
+            day_ac = df.loc[mask, "AC_kW"]
+            if day_ac.empty:
+                continue
+
+            hours = ((day_ac.index - day_ac.index.normalize()) / pd.Timedelta(hours=1)).to_numpy()
+            profile_fig.add_trace(
+                go.Scatter(
+                    x=hours,
+                    y=day_ac.values,
+                    mode="lines",
+                    name=f"{label} ({aligned_day.date()})",
+                )
+            )
+
+        if not profile_fig.data:
+            st.info("Unable to plot daily AC power profiles for the current dataset.")
+        else:
+            profile_fig.update_layout(
+                xaxis_title="Hour of day",
+                yaxis_title="AC power (kW)",
+                hovermode="x unified",
+                height=400,
+                margin=dict(l=40, r=20, t=40, b=40),
+            )
+            profile_fig.update_xaxes(range=[0, 24])
+            st.plotly_chart(profile_fig, use_container_width=True)
+
+
+with st.expander("Daily energy tables", expanded=False):
+    st.subheader("POA irradiance")
+    st.dataframe(poa_summary)
+    st.download_button(
+        "Download daily POA energy (CSV)",
+        data=dataframe_to_csv_bytes(poa_summary),
+        file_name="poa_daily_energy.csv",
+        mime="text/csv",
+        use_container_width=True,
+        key="poa_daily_download",
+    )
+    st.subheader("PV output")
+    st.dataframe(pv_summary)
+    st.download_button(
+        "Download daily PV energy (CSV)",
+        data=dataframe_to_csv_bytes(pv_summary),
+        file_name="pv_daily_energy.csv",
+        mime="text/csv",
+        use_container_width=True,
+        key="pv_daily_download",
+    )
+    st.subheader("Monthly POA energy")
+    st.dataframe(monthly_summary.rename(columns={"POA_kWh_per_m2": "POA kWh/m²"}))
+    st.download_button(
+        "Download monthly POA energy (CSV)",
+        data=dataframe_to_csv_bytes(monthly_summary),
+        file_name="poa_monthly_energy.csv",
+        mime="text/csv",
+        use_container_width=True,
+        key="poa_monthly_download",
+    )
+    st.subheader("Monthly PV energy")
+    st.dataframe(monthly_pv_summary)
+    st.download_button(
+        "Download monthly PV energy (CSV)",
+        data=dataframe_to_csv_bytes(monthly_pv_summary),
+        file_name="pv_monthly_energy.csv",
+        mime="text/csv",
+        use_container_width=True,
+        key="pv_monthly_download",
     )
 
 # Daily totals bar
